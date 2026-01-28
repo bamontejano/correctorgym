@@ -1,8 +1,9 @@
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { Pose } from '@mediapipe/pose';
 import * as cam from '@mediapipe/camera_utils';
+import * as drawingUtils from '@mediapipe/drawing_utils';
 import Webcam from 'react-webcam';
-import { Activity, AlertCircle, CheckCircle2, Repeat, Target, Eye, Maximize } from 'lucide-react';
+import { Activity, AlertCircle, CheckCircle2, Repeat, Target, Eye, Maximize, Loader2 } from 'lucide-react';
 
 const ExerciseDetector = () => {
     const webcamRef = useRef(null);
@@ -13,6 +14,8 @@ const ExerciseDetector = () => {
     const [isGoodForm, setIsGoodForm] = useState(true);
     const [currentAngle, setCurrentAngle] = useState(180);
     const [successPulse, setSuccessPulse] = useState(false);
+    const [modelLoaded, setModelLoaded] = useState(false);
+    const [isDetecting, setIsDetecting] = useState(false);
 
     const calculateAngle = (a, b, c) => {
         const radians = Math.atan2(c.y - b.y, c.x - b.x) - Math.atan2(a.y - b.y, a.x - b.x);
@@ -21,8 +24,8 @@ const ExerciseDetector = () => {
         return angle;
     };
 
-    const onResults = (results) => {
-        if (!results.poseLandmarks) return;
+    const onResults = useCallback((results) => {
+        if (!canvasRef.current || !webcamRef.current) return;
 
         const canvasElement = canvasRef.current;
         const canvasCtx = canvasElement.getContext('2d');
@@ -32,57 +35,92 @@ const ExerciseDetector = () => {
         canvasCtx.save();
         canvasCtx.clearRect(0, 0, width, height);
 
-        const landmarks = results.poseLandmarks;
+        // Mirror canvas drawing if webcam is mirrored
+        canvasCtx.translate(width, 0);
+        canvasCtx.scale(-1, 1);
 
-        // --- SQUAT LOGIC (Left Leg) ---
-        const hip = landmarks[24];
-        const knee = landmarks[26];
-        const ankle = landmarks[28];
-
-        const angle = calculateAngle(hip, knee, ankle);
-        setCurrentAngle(angle);
-
-        const cx = knee.x * width;
-        const cy = knee.y * height;
-
-        // Logic & Feedback
-        if (angle > 155) {
-            if (status === "up") {
-                setReps(prev => prev + 1);
-                setStatus("down");
-                setSuccessPulse(true);
-                setTimeout(() => setSuccessPulse(false), 800);
-            }
-            setFeedback("¡Baja!");
-            setIsGoodForm(true);
-        } else if (angle < 100) {
-            setStatus("up");
-            setFeedback("¡Perfecto!");
-            setIsGoodForm(true);
-        } else if (angle < 135 && angle > 100) {
-            setFeedback("Baja +");
-            setIsGoodForm(false);
+        if (!results.poseLandmarks) {
+            setIsDetecting(false);
+            canvasCtx.restore();
+            return;
         }
 
-        // HUD Drawing - Optimizado para Tablet
-        canvasCtx.shadowBlur = 10;
-        canvasCtx.shadowColor = isGoodForm ? '#00f2fe' : '#ff007c';
-        canvasCtx.strokeStyle = isGoodForm ? '#00f2fe' : '#ff007c';
-        canvasCtx.lineWidth = 6;
+        setIsDetecting(true);
+        const landmarks = results.poseLandmarks;
 
-        canvasCtx.beginPath();
-        canvasCtx.moveTo(hip.x * width, hip.y * height);
-        canvasCtx.lineTo(cx, cy);
-        canvasCtx.lineTo(ankle.x * width, ankle.y * height);
-        canvasCtx.stroke();
+        // Draw Skeleton
+        drawingUtils.drawConnectors(canvasCtx, landmarks, Pose.POSE_CONNECTIONS, {
+            color: isGoodForm ? '#00f2fe' : '#ff007c',
+            lineWidth: 2
+        });
+        drawingUtils.drawLandmarks(canvasCtx, landmarks, {
+            color: '#ffffff',
+            lineWidth: 1,
+            radius: 3
+        });
 
-        // Mini Label Angle
-        canvasCtx.fillStyle = "white";
-        canvasCtx.font = "bold 24px Outfit";
-        canvasCtx.fillText(`${Math.round(angle)}°`, cx + 30, cy);
+        // --- SQUAT LOGIC (Auto-detecting side) ---
+        // Landmarks: Left(24, 26, 28), Right(23, 25, 27)
+        const leftVisibility = (landmarks[24].visibility + landmarks[26].visibility + landmarks[28].visibility) / 3;
+        const rightVisibility = (landmarks[23].visibility + landmarks[25].visibility + landmarks[27].visibility) / 3;
+
+        const useLeft = leftVisibility > rightVisibility;
+        const hip = useLeft ? landmarks[24] : landmarks[23];
+        const knee = useLeft ? landmarks[26] : landmarks[25];
+        const ankle = useLeft ? landmarks[28] : landmarks[27];
+
+        if (hip.visibility > 0.5 && knee.visibility > 0.5 && ankle.visibility > 0.5) {
+            const angle = calculateAngle(hip, knee, ankle);
+            setCurrentAngle(angle);
+
+            const cx = knee.x * width;
+            const cy = knee.y * height;
+
+            // Logic & Feedback
+            if (angle > 155) {
+                if (status === "up") {
+                    setReps(prev => prev + 1);
+                    setStatus("down");
+                    setSuccessPulse(true);
+                    setTimeout(() => setSuccessPulse(false), 800);
+                }
+                setFeedback("¡Baja!");
+                setIsGoodForm(true);
+            } else if (angle < 100) {
+                setStatus("up");
+                setFeedback("¡Perfecto!");
+                setIsGoodForm(true);
+            } else if (angle < 135 && angle > 100) {
+                setFeedback("Baja más");
+                setIsGoodForm(false);
+            }
+
+            // HUD Drawing for the angle
+            canvasCtx.shadowBlur = 10;
+            canvasCtx.shadowColor = isGoodForm ? '#00f2fe' : '#ff007c';
+            canvasCtx.strokeStyle = isGoodForm ? '#00f2fe' : '#ff007c';
+            canvasCtx.lineWidth = 6;
+
+            canvasCtx.beginPath();
+            canvasCtx.moveTo(hip.x * width, hip.y * height);
+            canvasCtx.lineTo(cx, cy);
+            canvasCtx.lineTo(ankle.x * width, ankle.y * height);
+            canvasCtx.stroke();
+
+            // Handle text flipping because of canvas scale(-1, 1)
+            canvasCtx.save();
+            canvasCtx.translate(cx, cy);
+            canvasCtx.scale(-1, 1);
+            canvasCtx.fillStyle = "white";
+            canvasCtx.font = "bold 24px Outfit";
+            canvasCtx.fillText(`${Math.round(angle)}°`, 20, 0);
+            canvasCtx.restore();
+        } else {
+            setFeedback("Ponte de perfil");
+        }
 
         canvasCtx.restore();
-    };
+    }, [isGoodForm, status]);
 
     useEffect(() => {
         const pose = new Pose({
@@ -98,17 +136,36 @@ const ExerciseDetector = () => {
 
         pose.onResults(onResults);
 
-        if (typeof webcamRef.current !== "undefined" && webcamRef.current !== null) {
-            const camera = new cam.Camera(webcamRef.current.video, {
-                onFrame: async () => {
-                    await pose.send({ image: webcamRef.current.video });
-                },
-                width: 640,
-                height: 480,
-            });
-            camera.start();
-        }
-    }, []);
+        let camera = null;
+
+        const startCamera = () => {
+            if (webcamRef.current && webcamRef.current.video) {
+                camera = new cam.Camera(webcamRef.current.video, {
+                    onFrame: async () => {
+                        if (webcamRef.current && webcamRef.current.video) {
+                            await pose.send({ image: webcamRef.current.video });
+                        }
+                    },
+                    width: 640,
+                    height: 480,
+                });
+                camera.start().then(() => {
+                    setModelLoaded(true);
+                });
+            }
+        };
+
+        // Delay slightly to ensure webcam component is ready
+        const timeoutId = setTimeout(startCamera, 1000);
+
+        return () => {
+            clearTimeout(timeoutId);
+            if (camera) {
+                camera.stop();
+            }
+            pose.close();
+        };
+    }, [onResults]);
 
     return (
         <div className="w-full h-full flex flex-col p-4 gap-4 overflow-hidden bg-bg-dark">
@@ -116,12 +173,14 @@ const ExerciseDetector = () => {
             {/* Top Bar - Resumen rápido */}
             <div className="flex justify-between items-center px-2">
                 <div className="flex items-center gap-2">
-                    <Activity className="text-primary animate-pulse" size={16} />
-                    <span className="text-[10px] font-bold tracking-[0.2em] text-white/60 uppercase">System Ready</span>
+                    <Activity className={`text-primary ${modelLoaded ? 'animate-pulse' : ''}`} size={16} />
+                    <span className="text-[10px] font-bold tracking-[0.2em] text-white/60 uppercase">
+                        {modelLoaded ? (isDetecting ? 'Sujeto Detectado' : 'Buscando Sujeto...') : 'Cargando IA...'}
+                    </span>
                 </div>
                 <div className="flex gap-4">
                     <div className="text-right">
-                        <p className="text-[9px] text-text-muted uppercase">Ángulo</p>
+                        <p className="text-[9px] text-text-muted uppercase">Ángulo Actual</p>
                         <p className="text-sm font-bold text-white">{Math.round(currentAngle)}°</p>
                     </div>
                 </div>
@@ -129,6 +188,14 @@ const ExerciseDetector = () => {
 
             {/* Main Visualizer Area - Maximizada */}
             <div className={`relative flex-1 rounded-3xl overflow-hidden border-2 transition-all duration-300 ${successPulse ? 'success-flash border-primary' : 'border-white/10 shadow-2xl'}`}>
+
+                {/* Loading state if model not loaded */}
+                {!modelLoaded && (
+                    <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm">
+                        <Loader2 className="text-primary animate-spin mb-4" size={48} />
+                        <p className="text-white font-bold tracking-widest uppercase text-sm">Iniciando Biomecánica...</p>
+                    </div>
+                )}
 
                 {/* HUD Overlay Elements */}
                 <div className="hud-corner top-left !border-[2px]"></div>
@@ -141,6 +208,12 @@ const ExerciseDetector = () => {
                     ref={webcamRef}
                     className="w-full h-full object-cover"
                     mirrored={true}
+                    screenshotFormat="image/jpeg"
+                    videoConstraints={{
+                        width: 640,
+                        height: 480,
+                        facingMode: "user"
+                    }}
                 />
                 <canvas
                     ref={canvasRef}
@@ -170,8 +243,8 @@ const ExerciseDetector = () => {
 
                 {/* Label de IA */}
                 <div className="absolute top-6 left-6 flex items-center gap-2 bg-primary/20 backdrop-blur-md px-3 py-1 rounded-full border border-primary/30">
-                    <div className="w-1.5 h-1.5 bg-primary rounded-full animate-ping" />
-                    <span className="text-[9px] font-black text-white uppercase tracking-tighter">AI Core v1.0</span>
+                    <div className={`w-1.5 h-1.5 bg-primary rounded-full ${isDetecting ? 'animate-ping' : ''}`} />
+                    <span className="text-[9px] font-black text-white uppercase tracking-tighter">AI Core v1.1 - Pose Tracking</span>
                 </div>
             </div>
 
@@ -186,8 +259,8 @@ const ExerciseDetector = () => {
                 </button>
 
                 <div className="glass bg-primary/10 border-primary/20 py-4 rounded-2xl flex flex-col items-center justify-center">
-                    <span className="text-[9px] text-primary font-bold uppercase tracking-widest">Calidad Técnica</span>
-                    <span className="text-lg font-black text-white">{isGoodForm ? '85%' : '40%'}</span>
+                    <span className="text-[9px] text-primary font-bold uppercase tracking-widest">Estado</span>
+                    <span className="text-lg font-black text-white uppercase">{status === 'down' ? 'Arriba' : 'Abajo'}</span>
                 </div>
             </div>
 
@@ -196,3 +269,4 @@ const ExerciseDetector = () => {
 };
 
 export default ExerciseDetector;
+
